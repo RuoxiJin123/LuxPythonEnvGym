@@ -491,73 +491,138 @@ class AgentPolicy(AgentWithModel):
         self.city_tiles_last = 0
         self.fuel_collected_last = 0
 
-    def get_reward(self, game, is_game_finished, is_new_turn, is_game_error):
-        """
-        Returns the reward function for this step of the game. Reward should be a
-        delta increment to the reward, not the total current reward.
-        """
-        if is_game_error:
-            # Game environment step failed, assign a game lost reward to not incentivise this
-            print("Game failed due to error")
-            return -1.0
+    import math
+from luxai2021.game.game_constants import GAME_CONSTANTS
 
-        if not is_new_turn and not is_game_finished:
-            # Only apply rewards at the start of each turn or at game end
-            return 0
+def get_reward(self, game, is_game_finished, is_new_turn, is_game_error):
+    """
+    Returns the reward function for this step of the game. Reward should be a
+    delta increment to the reward, not the total current reward.
+    """
+    if is_game_error:
+        # Game environment step failed, assign a game lost reward to not incentivize this
+        print("Game failed due to error")
+        return -1.0
 
-        # Get some basic stats
-        unit_count = len(game.state["teamStates"][self.team]["units"])
+    if not is_new_turn and not is_game_finished:
+        # Only apply rewards at the start of each turn or at game end
+        return 0
 
-        city_count = 0
-        city_count_opponent = 0
-        city_tile_count = 0
-        city_tile_count_opponent = 0
-        for city in game.cities.values():
-            if city.team == self.team:
-                city_count += 1
-            else:
-                city_count_opponent += 1
+    team = self.team
+    reward = 0
 
-            for cell in city.city_cells:
-                if city.team == self.team:
-                    city_tile_count += 1
-                else:
-                    city_tile_count_opponent += 1
-        
-        rewards = {}
-        
-        # Give a reward for unit creation/death. 0.05 reward per unit.
-        rewards["rew/r_units"] = (unit_count - self.units_last) * 0.05
-        self.units_last = unit_count
+    # Reward for owning CityTiles
+    city_tile_count = sum(len(city.city_cells) for city in game.cities.values() if city.team == team)
+    reward += city_tile_count * 0.1 
 
-        # Give a reward for city creation/death. 0.1 reward per city.
-        rewards["rew/r_city_tiles"] = (city_tile_count - self.city_tiles_last) * 0.1
-        self.city_tiles_last = city_tile_count
+    # Reward for owning Units
+    unit_count = len(game.state["teamStates"][team]["units"])
+    reward += unit_count * 0.05  
 
-        # Reward collecting fuel
-        fuel_collected = game.stats["teamStats"][self.team]["fuelGenerated"]
-        rewards["rew/r_fuel_collected"] = ( (fuel_collected - self.fuel_collected_last) / 20000 )
-        self.fuel_collected_last = fuel_collected
-        
-        # Give a reward of 1.0 per city tile alive at the end of the game
-        rewards["rew/r_city_tiles_end"] = 0
-        if is_game_finished:
-            self.is_last_turn = True
-            rewards["rew/r_city_tiles_end"] = city_tile_count
+    # Reward for collecting fuel
+    fuel_collected = game.stats["teamStats"][team]["fuelGenerated"]
+    reward += fuel_collected / 20000  
 
-            '''
-            # Example of a game win/loss reward instead
-            if game.get_winning_team() == self.team:
-                rewards["rew/r_game_win"] = 100.0 # Win
-            else:
-                rewards["rew/r_game_win"] = -100.0 # Loss
-            '''
-        
-        reward = 0
-        for name, value in rewards.items():
-            reward += value
+    # Penalty for losing Units or Cities due to lack of fuel during the night
+    units_lost = 0
+    cities_lost = 0
+    for unit in game.state["teamStates"][team]["units"].values():
+        if unit.type == Constants.UNIT_TYPES.WORKER:
+            if unit.cargo.get(Constants.RESOURCE_TYPES.WOOD, 0) + \
+               unit.cargo.get(Constants.RESOURCE_TYPES.COAL, 0) * 10 + \
+               unit.cargo.get(Constants.RESOURCE_TYPES.URANIUM, 0) * 40 < Constants.PARAMETERS.LIGHT_UPKEEP_UNIT:
+                units_lost += 1
+        elif unit.type == Constants.UNIT_TYPES.CART:
+            if unit.cargo.get(Constants.RESOURCE_TYPES.WOOD, 0) + \
+               unit.cargo.get(Constants.RESOURCE_TYPES.COAL, 0) * 10 + \
+               unit.cargo.get(Constants.RESOURCE_TYPES.URANIUM, 0) * 40 < Constants.PARAMETERS.LIGHT_UPKEEP_CART:
+                units_lost += 1
 
-        return reward
+    for city in game.cities.values():
+        if city.team == team:
+            if city.fuel < city.get_light_upkeep() * (Constants.PARAMETERS.MAX_DAYS - game.state["turn"]):
+                cities_lost += 1
+
+    reward -= (units_lost + cities_lost) * 0.5  
+
+    # Reward for researching
+    research_points = game.state["teamStates"][team]["researchPoints"]
+    reward += research_points * 0.01  
+
+    # Reward for building Roads
+    road_levels = sum(cell.road for cell in game.map.iter_cells())
+    reward += road_levels * 0.01  
+
+    # Reward for efficient resource distribution and utilization
+    resource_efficiency = 0
+    total_resources = sum(unit.cargo.values() for unit in game.state["teamStates"][team]["units"].values())
+    total_fuel_needed = sum(city.get_light_upkeep() for city in game.cities.values() if city.team == team)
+    if total_fuel_needed > 0:
+        resource_efficiency = min(total_resources / total_fuel_needed, 1)
+    reward += resource_efficiency * 0.1 
+
+    # Reward for city expansion and connectivity
+    city_clustering_reward = 0
+    for city in game.cities.values():
+        if city.team == team:
+            adjacent_city_tiles = sum(1 for cell in city.city_cells if any(game.map.get_cell_by_pos(cell.pos.move(d)).city_tile is not None for d in Constants.DIRECTIONS))
+            city_clustering_reward += adjacent_city_tiles / len(city.city_cells)
+    reward += city_clustering_reward * 0.05 
+
+    # Reward for defensive strategies
+    defensive_reward = 0
+    for city in game.cities.values():
+        if city.team == team:
+            defensive_reward += len(city.city_cells) * (1 + len(city.units) / len(city.city_cells))
+    reward += defensive_reward * 0.01 
+
+    # Reward for resource forecasting and planning
+    night_turns_left = Constants.PARAMETERS.MAX_DAYS - game.state["turn"] - (Constants.PARAMETERS.MAX_DAYS % Constants.PARAMETERS.DAY_LENGTH)
+    fuel_for_night = sum(unit.cargo.get(Constants.RESOURCE_TYPES.WOOD, 0) + unit.cargo.get(Constants.RESOURCE_TYPES.COAL, 0) * 10 + unit.cargo.get(Constants.RESOURCE_TYPES.URANIUM, 0) * 40 for unit in game.state["teamStates"][team]["units"].values())
+    fuel_needed_for_night = sum(city.get_light_upkeep() * night_turns_left for city in game.cities.values() if city.team == team)
+    planning_reward = min(fuel_for_night / fuel_needed_for_night, 1)
+    reward += planning_reward * 0.1
+
+    # Reward for opponent monitoring and reaction
+    opponent_team = (team + 1) % 2
+    opponent_city_tile_count = sum(len(city.city_cells) for city in game.cities.values() if city.team == opponent_team)
+    opponent_unit_count = len(game.state["teamStates"][opponent_team]["units"])
+    reaction_reward = 1 - (opponent_city_tile_count + opponent_unit_count) / (city_tile_count + unit_count + 1)
+    reward += reaction_reward * 0.05 
+
+    # Reward for exploration and map awareness
+    explored_cells = sum(1 for cell in game.map.iter_cells() if cell.is_explored())
+    total_cells = game.map.width * game.map.height
+    exploration_reward = explored_cells / total_cells
+    reward += exploration_reward * 0.05  
+
+    # Reward for long-term planning and strategy
+    turns_left = Constants.PARAMETERS.MAX_DAYS - game.state["turn"]
+    strategy_reward = math.log(turns_left + 1) / math.log(Constants.PARAMETERS.MAX_DAYS + 1)
+    reward += strategy_reward * 0.1  
+
+    # Reward for efficient unit utilization
+    unit_utilization_reward = 0
+    for unit in game.state["teamStates"][team]["units"].values():
+        if unit.type == Constants.UNIT_TYPES.WORKER:
+            unit_utilization_reward += unit.cargo.sum() / Constants.PARAMETERS.RESOURCE_CAPACITY["WORKER"]
+        elif unit.type == Constants.UNIT_TYPES.CART:
+            unit_utilization_reward += unit.cargo.sum() / Constants.PARAMETERS.RESOURCE_CAPACITY["CART"]
+    unit_utilization_reward /= len(game.state["teamStates"][team]["units"])
+    reward += unit_utilization_reward * 0.05  
+
+    if is_game_finished:
+        # Additional reward or penalty for winning or losing the game
+        winning_team = game.get_winning_team()
+        if winning_team == team:
+            reward += 100.0  
+        elif winning_team is not None:
+            reward -= 100.0  
+
+    self.units_last = unit_count
+    self.city_tiles_last = city_tile_count
+
+    return reward
 
     def turn_heurstics(self, game, is_first_turn):
         """
