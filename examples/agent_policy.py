@@ -491,7 +491,7 @@ class AgentPolicy(AgentWithModel):
         self.city_tiles_last = 0
         self.fuel_collected_last = 0
 
-    import math
+import math
 from luxai2021.game.game_constants import GAME_CONSTANTS
 
 def get_reward(self, game, is_game_finished, is_new_turn, is_game_error):
